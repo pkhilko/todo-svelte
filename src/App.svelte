@@ -29,17 +29,20 @@
     activeList.todos = [...activeList.todos, { id: nextId++, text: trimmed, completed: false }];
     lists = [...lists];
     newText = '';
+    if (initialized) saveToStorage();
   }
 
   function toggleTodo(id) {
     activeList.todos = activeList.todos.map(t => t.id === id ? { ...t, completed: !t.completed } : t);
     lists = [...lists];
+    if (initialized) saveToStorage();
   }
 
   function deleteTodo(id) {
     activeList.todos = activeList.todos.filter(t => t.id !== id);
     lists = [...lists];
     if (editingId === id) cancelEdit();
+    if (initialized) saveToStorage();
   }
 
   function startEdit(todo) {
@@ -53,6 +56,7 @@
     activeList.todos = activeList.todos.map(t => t.id === id ? { ...t, text: trimmed } : t);
     lists = [...lists];
     cancelEdit();
+    if (initialized) saveToStorage();
   }
 
   function cancelEdit() {
@@ -68,6 +72,7 @@
     lists = [...lists, { id: nextListId++, name: trimmed, todos: [] }];
     activeListId = lists[lists.length - 1].id;
     newListName = '';
+    if (initialized) saveToStorage();
   }
 
   function deleteList(id) {
@@ -76,6 +81,7 @@
     if (activeListId === id) {
       activeListId = lists[0].id;
     }
+    if (initialized) saveToStorage();
   }
 
   // Key Handlers
@@ -121,8 +127,10 @@
   $: completedCount = activeList.todos.filter(t => t.completed).length;
 
   // LocalStorage Persistence
+  import { onMount } from 'svelte';
+  let initialized = false;
+
   function loadFromStorage() {
-    if (typeof window === 'undefined') return;
     try {
       const saved = localStorage.getItem('todoo-data');
       if (saved) {
@@ -131,17 +139,18 @@
           lists = data.lists;
           nextListId = data.nextListId || 2;
           nextId = data.nextId || 1;
+          activeListId = data.activeListId || 1;
+          dark = data.dark ?? false;
         }
-        if (data.activeListId) activeListId = data.activeListId;
-        if (data.dark !== undefined) dark = data.dark;
       }
     } catch (e) {
       console.error('Failed to load from localStorage:', e);
     }
+    initialized = true;
   }
 
   function saveToStorage() {
-    if (typeof window === 'undefined') return;
+    if (!initialized) return; // Don't save until after load
     try {
       localStorage.setItem('todoo-data', JSON.stringify({
         lists,
@@ -155,10 +164,6 @@
     }
   }
 
-  $: lists, dark, activeListId, saveToStorage();
-
-  // On mount, restore from storage
-  import { onMount } from 'svelte';
   onMount(() => {
     loadFromStorage();
   });
@@ -177,6 +182,7 @@
     }
     lists = lists.map(l => l.id === id ? { ...l, name: trimmed } : l);
     cancelEditList();
+    if (initialized) saveToStorage();
   }
 
   function cancelEditList() {
@@ -193,10 +199,17 @@
   function clearCompleted() {
     activeList.todos = activeList.todos.filter(t => !t.completed);
     lists = [...lists];
+    if (initialized) saveToStorage();
   }
 
   // Reset filter when switching lists
   $: activeListId, filter = 'all';
+
+  // Save dark mode changes
+  function toggleDarkMode() {
+    dark = !dark;
+    if (initialized) saveToStorage();
+  }
 </script>
 
 <main class:dark>
@@ -216,7 +229,7 @@
       <div class="lists-header">
         <h2>Lists</h2>
         <div class="header-actions">
-          <button class="btn-theme" on:click={() => (dark = !dark)}>
+          <button class="btn-theme" on:click={toggleDarkMode}>
             {dark ? '☀' : '☾'}
           </button>
           <button class="btn-close-sidebar" on:click={closeSidebar} title="Close">
