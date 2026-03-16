@@ -103,6 +103,100 @@
   function closeSidebar() {
     sidebarOpen = false;
   }
+
+  // Filter State
+  let filter = 'all';
+
+  // List rename editing
+  let editingListId = null;
+  let editListName = '';
+
+  // Derived state for filtering
+  $: visibleTodos = filter === 'all'
+    ? activeList.todos
+    : filter === 'active'
+    ? activeList.todos.filter(t => !t.completed)
+    : activeList.todos.filter(t => t.completed);
+
+  $: completedCount = activeList.todos.filter(t => t.completed).length;
+
+  // LocalStorage Persistence
+  function loadFromStorage() {
+    if (typeof window === 'undefined') return;
+    try {
+      const saved = localStorage.getItem('todoo-data');
+      if (saved) {
+        const data = JSON.parse(saved);
+        if (data.lists?.length > 0) {
+          lists = data.lists;
+          nextListId = data.nextListId || 2;
+          nextId = data.nextId || 1;
+        }
+        if (data.activeListId) activeListId = data.activeListId;
+        if (data.dark !== undefined) dark = data.dark;
+      }
+    } catch (e) {
+      console.error('Failed to load from localStorage:', e);
+    }
+  }
+
+  function saveToStorage() {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.setItem('todoo-data', JSON.stringify({
+        lists,
+        activeListId,
+        nextListId,
+        nextId,
+        dark
+      }));
+    } catch (e) {
+      console.error('Failed to save to localStorage:', e);
+    }
+  }
+
+  $: lists, dark, activeListId, saveToStorage();
+
+  // On mount, restore from storage
+  import { onMount } from 'svelte';
+  onMount(() => {
+    loadFromStorage();
+  });
+
+  // List Rename Functions
+  function startEditList(id, name) {
+    editingListId = id;
+    editListName = name;
+  }
+
+  function saveListName(id) {
+    const trimmed = editListName.trim();
+    if (!trimmed) {
+      cancelEditList();
+      return;
+    }
+    lists = lists.map(l => l.id === id ? { ...l, name: trimmed } : l);
+    cancelEditList();
+  }
+
+  function cancelEditList() {
+    editingListId = null;
+    editListName = '';
+  }
+
+  function handleListNameKey(e, id) {
+    if (e.key === 'Enter') saveListName(id);
+    if (e.key === 'Escape') cancelEditList();
+  }
+
+  // Clear Completed Todos
+  function clearCompleted() {
+    activeList.todos = activeList.todos.filter(t => !t.completed);
+    lists = [...lists];
+  }
+
+  // Reset filter when switching lists
+  $: activeListId, filter = 'all';
 </script>
 
 <main class:dark>
@@ -134,12 +228,24 @@
       <ul class="lists">
         {#each lists as list (list.id)}
           <li class:active={activeListId === list.id}>
-            <button
-              class="list-item"
-              on:click={() => (activeListId = list.id)}
-            >
-              {list.name}
-            </button>
+            {#if editingListId === list.id}
+              <input
+                class="edit-list-name"
+                type="text"
+                bind:value={editListName}
+                on:keydown={(e) => handleListNameKey(e, list.id)}
+                on:blur={() => saveListName(list.id)}
+                autofocus
+              />
+            {:else}
+              <button
+                class="list-item"
+                on:click={() => (activeListId = list.id)}
+                on:dblclick={() => startEditList(list.id, list.name)}
+              >
+                {list.name}
+              </button>
+            {/if}
             {#if lists.length > 1}
               <button
                 class="btn-delete-list"
@@ -184,11 +290,42 @@
       </div>
 
       {#if total > 0}
-        <p class="stats">{remaining} of {total} remaining</p>
+        <div class="stats-row">
+          <p class="stats">{remaining} of {total} remaining</p>
+          {#if completedCount > 0}
+            <button class="btn-clear-completed" on:click={clearCompleted}>
+              Clear completed
+            </button>
+          {/if}
+        </div>
+
+        <div class="filter-tabs">
+          <button
+            class="filter-tab"
+            class:active={filter === 'all'}
+            on:click={() => (filter = 'all')}
+          >
+            All
+          </button>
+          <button
+            class="filter-tab"
+            class:active={filter === 'active'}
+            on:click={() => (filter = 'active')}
+          >
+            Active
+          </button>
+          <button
+            class="filter-tab"
+            class:active={filter === 'completed'}
+            on:click={() => (filter = 'completed')}
+          >
+            Completed
+          </button>
+        </div>
       {/if}
 
       <ul class="todos">
-        {#each activeList.todos as todo (todo.id)}
+        {#each visibleTodos as todo (todo.id)}
           <li class:completed={todo.completed}>
             {#if editingId === todo.id}
               <input
@@ -406,6 +543,18 @@
     font-weight: 600;
   }
 
+  .edit-list-name {
+    flex: 1;
+    padding: 8px 10px;
+    background: var(--surface);
+    color: var(--text);
+    border: 2px solid var(--accent);
+    border-radius: 4px;
+    font-size: 0.95rem;
+    font-weight: 500;
+    outline: none;
+  }
+
   .btn-delete-list {
     width: 28px;
     height: 28px;
@@ -552,11 +701,64 @@
     background: var(--accent-dark);
   }
 
+  .stats-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    gap: 12px;
+  }
+
   .stats {
     font-size: 0.85rem;
     color: var(--text-muted);
+  }
+
+  .btn-clear-completed {
+    padding: 6px 12px;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color 0.2s, border-color 0.2s, background 0.2s;
+  }
+
+  .btn-clear-completed:hover {
+    color: var(--text);
+    border-color: var(--accent);
+    background: var(--border);
+  }
+
+  .filter-tabs {
+    display: flex;
+    gap: 6px;
     margin-bottom: 16px;
-    text-align: right;
+  }
+
+  .filter-tab {
+    flex: 1;
+    padding: 8px 12px;
+    background: var(--surface);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 0.2s;
+  }
+
+  .filter-tab:hover {
+    border-color: var(--accent);
+  }
+
+  .filter-tab.active {
+    background: var(--sidebar-active);
+    color: var(--sidebar-active-text);
+    border-color: var(--sidebar-active);
   }
 
   .todos {
@@ -718,7 +920,29 @@
       font-size: 16px;
     }
 
+    .stats-row {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+
     .stats {
+      font-size: 0.8rem;
+      text-align: center;
+    }
+
+    .btn-clear-completed {
+      width: 100%;
+      text-align: center;
+    }
+
+    .filter-tabs {
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+
+    .filter-tab {
+      padding: 6px 8px;
       font-size: 0.8rem;
     }
 
@@ -764,6 +988,20 @@
       padding: 8px 10px;
       font-size: 16px;
       border-radius: 6px;
+    }
+
+    .stats-row {
+      gap: 6px;
+    }
+
+    .filter-tabs {
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+
+    .filter-tab {
+      padding: 6px 6px;
+      font-size: 0.75rem;
     }
 
     .btn-add {
