@@ -251,6 +251,120 @@
     dark = !dark;
     if (initialized) saveToStorage();
   }
+
+  // Tier 3: Drag & Drop, Keyboard Shortcuts, Delete Confirmation
+  let draggedTodoId = null;
+  let draggedListId = null;
+  let deletingListId = null;
+  let todoInputRef = null;
+
+  // Drag handlers for todos
+  function handleTodoDragStart(e, todoId) {
+    draggedTodoId = todoId;
+    e.dataTransfer.effectAllowed = 'move';
+  }
+
+  function handleTodoDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  }
+
+  function handleTodoDrop(e, targetTodoId) {
+    e.preventDefault();
+    if (!draggedTodoId || draggedTodoId === targetTodoId) {
+      draggedTodoId = null;
+      return;
+    }
+
+    const todos = activeList.todos;
+    const draggedIndex = todos.findIndex(t => t.id === draggedTodoId);
+    const targetIndex = todos.findIndex(t => t.id === targetTodoId);
+
+    if (draggedIndex === -1 || targetIndex === -1) return;
+
+    const reordered = [...todos];
+    const [dragged] = reordered.splice(draggedIndex, 1);
+    reordered.splice(targetIndex, 0, dragged);
+
+    activeList.todos = reordered;
+    lists = [...lists];
+    draggedTodoId = null;
+    if (initialized) saveToStorage();
+  }
+
+  function handleTodoDragEnd() {
+    draggedTodoId = null;
+  }
+
+  // Drag handlers for lists
+  function handleListDragStart(e, listId) {
+    draggedListId = listId;
+    e.dataTransfer.effectAllowed = 'move';
+  }
+
+  function handleListDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  }
+
+  function handleListDrop(e, targetListId) {
+    e.preventDefault();
+    if (!draggedListId || draggedListId === targetListId) {
+      draggedListId = null;
+      return;
+    }
+
+    const draggedIndex = lists.findIndex(l => l.id === draggedListId);
+    const targetIndex = lists.findIndex(l => l.id === targetListId);
+
+    if (draggedIndex === -1 || targetIndex === -1) return;
+
+    const reordered = [...lists];
+    const [dragged] = reordered.splice(draggedIndex, 1);
+    reordered.splice(targetIndex, 0, dragged);
+
+    lists = reordered;
+    draggedListId = null;
+    if (initialized) saveToStorage();
+  }
+
+  function handleListDragEnd() {
+    draggedListId = null;
+  }
+
+  // Delete list with confirmation
+  function startDeleteList(id) {
+    deletingListId = id;
+  }
+
+  function confirmDeleteList() {
+    if (deletingListId !== null) {
+      deleteList(deletingListId);
+      deletingListId = null;
+    }
+  }
+
+  function cancelDeleteList() {
+    deletingListId = null;
+  }
+
+  // Keyboard shortcut handler
+  function handleKeyDown(e) {
+    // Press "/" to focus the input
+    if (e.key === '/' && todoInputRef) {
+      e.preventDefault();
+      todoInputRef.focus();
+    }
+  }
+
+  // Set up keyboard listener on mount
+  onMount(() => {
+    loadFromStorage();
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  });
 </script>
 
 <main class:dark>
@@ -281,7 +395,15 @@
 
       <ul class="lists">
         {#each lists as list (list.id)}
-          <li class:active={activeListId === list.id}>
+          <li
+            class:active={activeListId === list.id}
+            class:dragging={draggedListId === list.id}
+            draggable={lists.length > 1}
+            on:dragstart={(e) => handleListDragStart(e, list.id)}
+            on:dragover={handleListDragOver}
+            on:drop={(e) => handleListDrop(e, list.id)}
+            on:dragend={handleListDragEnd}
+          >
             {#if editingListId === list.id}
               <input
                 class="edit-list-name"
@@ -301,13 +423,21 @@
               </button>
             {/if}
             {#if lists.length > 1}
-              <button
-                class="btn-delete-list"
-                on:click={() => deleteList(list.id)}
-                title="Delete list"
-              >
-                ×
-              </button>
+              {#if deletingListId === list.id}
+                <div class="delete-confirm">
+                  <span class="confirm-text">{list.todos.length} todo{list.todos.length !== 1 ? 's' : ''}?</span>
+                  <button class="btn-confirm-yes" on:click={confirmDeleteList}>Yes</button>
+                  <button class="btn-confirm-no" on:click={cancelDeleteList}>No</button>
+                </div>
+              {:else}
+                <button
+                  class="btn-delete-list"
+                  on:click={() => startDeleteList(list.id)}
+                  title="Delete list"
+                >
+                  ×
+                </button>
+              {/if}
             {/if}
           </li>
         {/each}
@@ -336,8 +466,9 @@
       <div class="input-row">
         <input
           type="text"
-          placeholder="What needs to be done?"
+          placeholder="What needs to be done? (Press / to focus)"
           bind:value={newText}
+          bind:this={todoInputRef}
           on:keydown={handleAddKey}
         />
         <select class="priority-select" bind:value={newPriority}>
@@ -403,6 +534,12 @@
             class:priority-high={todo.priority === 'high'}
             class:priority-medium={todo.priority === 'medium'}
             class:priority-low={todo.priority === 'low'}
+            class:dragging={draggedTodoId === todo.id}
+            draggable={!editingId}
+            on:dragstart={(e) => handleTodoDragStart(e, todo.id)}
+            on:dragover={handleTodoDragOver}
+            on:drop={(e) => handleTodoDrop(e, todo.id)}
+            on:dragend={handleTodoDragEnd}
           >
             {#if editingId === todo.id}
               <input
@@ -967,6 +1104,73 @@
     font-weight: 600;
   }
 
+  /* Drag and drop styles */
+  .todos li {
+    cursor: grab;
+  }
+
+  .todos li:active {
+    cursor: grabbing;
+  }
+
+  .todos li.dragging {
+    opacity: 0.5;
+    background: var(--border);
+  }
+
+  .lists li {
+    cursor: grab;
+  }
+
+  .lists li.dragging {
+    opacity: 0.5;
+    background: var(--border);
+  }
+
+  /* Delete confirmation styles */
+  .delete-confirm {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-shrink: 0;
+  }
+
+  .confirm-text {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .btn-confirm-yes,
+  .btn-confirm-no {
+    padding: 4px 8px;
+    font-size: 0.75rem;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 0.2s;
+  }
+
+  .btn-confirm-yes {
+    background: #dc2626;
+    color: white;
+  }
+
+  .btn-confirm-yes:hover {
+    background: #991b1b;
+  }
+
+  .btn-confirm-no {
+    background: var(--border);
+    color: var(--text);
+  }
+
+  .btn-confirm-no:hover {
+    background: var(--sidebar-active);
+    color: var(--sidebar-active-text);
+  }
+
   .todos li input[type="checkbox"] {
     width: 18px;
     height: 18px;
@@ -1163,6 +1367,20 @@
       padding: 10px 14px;
       font-size: 0.95rem;
     }
+
+    .delete-confirm {
+      gap: 4px;
+    }
+
+    .confirm-text {
+      font-size: 0.75rem;
+    }
+
+    .btn-confirm-yes,
+    .btn-confirm-no {
+      padding: 3px 6px;
+      font-size: 0.7rem;
+    }
   }
 
   @media (max-width: 480px) {
@@ -1266,6 +1484,20 @@
     .list-item {
       font-size: 0.9rem;
       padding: 8px 10px;
+    }
+
+    .delete-confirm {
+      gap: 3px;
+    }
+
+    .confirm-text {
+      font-size: 0.7rem;
+    }
+
+    .btn-confirm-yes,
+    .btn-confirm-no {
+      padding: 2px 5px;
+      font-size: 0.65rem;
     }
   }
 </style>
