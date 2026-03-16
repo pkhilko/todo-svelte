@@ -26,9 +26,17 @@
   function addTodo() {
     const trimmed = newText.trim();
     if (!trimmed) return;
-    activeList.todos = [...activeList.todos, { id: nextId++, text: trimmed, completed: false }];
+    activeList.todos = [...activeList.todos, {
+      id: nextId++,
+      text: trimmed,
+      completed: false,
+      priority: newPriority,
+      dueDate: newDueDate
+    }];
     lists = [...lists];
     newText = '';
+    newPriority = 'medium';
+    newDueDate = '';
     if (initialized) saveToStorage();
   }
 
@@ -117,14 +125,47 @@
   let editingListId = null;
   let editListName = '';
 
+  // Tier 2: Priority, Due Date, Search
+  let newPriority = 'medium';
+  let newDueDate = '';
+  let searchText = '';
+
   // Derived state for filtering
-  $: visibleTodos = filter === 'all'
+  $: filteredByStatus = filter === 'all'
     ? activeList.todos
     : filter === 'active'
     ? activeList.todos.filter(t => !t.completed)
     : activeList.todos.filter(t => t.completed);
 
+  $: visibleTodos = searchText.trim()
+    ? filteredByStatus.filter(t => t.text.toLowerCase().includes(searchText.toLowerCase()))
+    : filteredByStatus;
+
   $: completedCount = activeList.todos.filter(t => t.completed).length;
+
+  // Helper function to check if todo is overdue
+  function isOverdue(dueDate) {
+    if (!dueDate) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const due = new Date(dueDate);
+    due.setHours(0, 0, 0, 0);
+    return due < today;
+  }
+
+  // Helper function to format date
+  function formatDate(dateStr) {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  }
+
+  // Helper function to check if date is today
+  function isToday(dateStr) {
+    if (!dateStr) return false;
+    const today = new Date().toISOString().split('T')[0];
+    return dateStr === today;
+  }
 
   // LocalStorage Persistence
   import { onMount } from 'svelte';
@@ -299,8 +340,25 @@
           bind:value={newText}
           on:keydown={handleAddKey}
         />
+        <select class="priority-select" bind:value={newPriority}>
+          <option value="low">Low</option>
+          <option value="medium">Med</option>
+          <option value="high">High</option>
+        </select>
+        <input type="date" class="date-input" bind:value={newDueDate} />
         <button class="btn-add" on:click={addTodo}>Add</button>
       </div>
+
+      {#if total > 0 || visibleTodos.length > 0}
+        <div class="search-row">
+          <input
+            type="text"
+            placeholder="Search todos..."
+            bind:value={searchText}
+            class="search-input"
+          />
+        </div>
+      {/if}
 
       {#if total > 0}
         <div class="stats-row">
@@ -339,7 +397,13 @@
 
       <ul class="todos">
         {#each visibleTodos as todo (todo.id)}
-          <li class:completed={todo.completed}>
+          <li
+            class:completed={todo.completed}
+            class:overdue={!todo.completed && isOverdue(todo.dueDate)}
+            class:priority-high={todo.priority === 'high'}
+            class:priority-medium={todo.priority === 'medium'}
+            class:priority-low={todo.priority === 'low'}
+          >
             {#if editingId === todo.id}
               <input
                 class="edit-input"
@@ -358,7 +422,18 @@
                 checked={todo.completed}
                 on:change={() => toggleTodo(todo.id)}
               />
-              <span class="todo-text">{todo.text}</span>
+              <div class="todo-content">
+                <span class="todo-text">{todo.text}</span>
+                {#if todo.dueDate || todo.priority !== 'medium'}
+                  <div class="todo-meta">
+                    {#if todo.dueDate}
+                      <span class="due-date" class:today={isToday(todo.dueDate)} class:overdue={!todo.completed && isOverdue(todo.dueDate)}>
+                        {formatDate(todo.dueDate)}
+                      </span>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
               <div class="actions">
                 <button class="btn-edit" on:click={() => startEdit(todo)}>Edit</button>
                 <button class="btn-delete" on:click={() => deleteTodo(todo.id)}>Delete</button>
@@ -366,7 +441,11 @@
             {/if}
           </li>
         {:else}
-          <p class="empty">No todos yet. Add one above!</p>
+          {#if searchText.trim()}
+            <p class="empty">No todos found for "{searchText}"</p>
+          {:else}
+            <p class="empty">No todos yet. Add one above!</p>
+          {/if}
         {/each}
       </ul>
     </div>
@@ -698,6 +777,43 @@
     border-color: var(--accent);
   }
 
+  .priority-select,
+  .date-input {
+    padding: 10px 10px;
+    background: var(--surface);
+    color: var(--text);
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .priority-select:focus,
+  .date-input:focus {
+    border-color: var(--accent);
+  }
+
+  .search-row {
+    margin-bottom: 12px;
+  }
+
+  .search-input {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--surface);
+    color: var(--text);
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .search-input:focus {
+    border-color: var(--accent);
+  }
+
   .btn-add {
     padding: 10px 18px;
     background: var(--accent);
@@ -789,12 +905,66 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
+    border-left: 4px solid transparent;
     transition: background 0.2s, border-color 0.2s;
+  }
+
+  .todos li.priority-high {
+    border-left-color: #dc2626;
+  }
+
+  .todos li.priority-medium {
+    border-left-color: #f59e0b;
+  }
+
+  .todos li.priority-low {
+    border-left-color: #10b981;
+  }
+
+  .todos li.overdue {
+    background: rgba(220, 38, 38, 0.1);
+  }
+
+  main.dark .todos li.overdue {
+    background: rgba(220, 38, 38, 0.2);
   }
 
   .todos li.completed .todo-text {
     text-decoration: line-through;
     color: var(--text-muted);
+  }
+
+  .todo-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .todo-meta {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .due-date {
+    font-size: 0.8rem;
+    padding: 2px 6px;
+    background: var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+  }
+
+  .due-date.today {
+    background: #fbbf24;
+    color: #1a1a2e;
+    font-weight: 600;
+  }
+
+  .due-date.overdue {
+    background: #dc2626;
+    color: white;
+    font-weight: 600;
   }
 
   .todos li input[type="checkbox"] {
@@ -928,9 +1098,26 @@
       margin-bottom: 16px;
     }
 
+    .input-row {
+      flex-wrap: wrap;
+    }
+
     .input-row input {
       padding: 10px 12px;
       font-size: 16px;
+      flex: 1;
+      min-width: 150px;
+    }
+
+    .priority-select,
+    .date-input {
+      padding: 10px 8px;
+      font-size: 0.85rem;
+    }
+
+    .search-input {
+      padding: 8px 12px;
+      font-size: 0.9rem;
     }
 
     .stats-row {
@@ -995,12 +1182,31 @@
     .input-row {
       gap: 6px;
       margin-bottom: 8px;
+      flex-wrap: wrap;
     }
 
     .input-row input {
       padding: 8px 10px;
       font-size: 16px;
       border-radius: 6px;
+      min-width: 120px;
+      flex: 1;
+    }
+
+    .priority-select,
+    .date-input {
+      padding: 8px 8px;
+      font-size: 0.8rem;
+    }
+
+    .search-input {
+      padding: 8px 10px;
+      font-size: 0.85rem;
+    }
+
+    .due-date {
+      font-size: 0.75rem;
+      padding: 2px 4px;
     }
 
     .stats-row {
