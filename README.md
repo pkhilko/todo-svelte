@@ -6,6 +6,12 @@ A modern, feature-rich todo list application built with **Svelte 5** and **Vite*
 ![Svelte](https://img.shields.io/badge/svelte-5.53.7-FF3E00?style=flat-square)
 ![Vite](https://img.shields.io/badge/vite-8.0.0-646CFF?style=flat-square)
 
+## 🌐 Try It Online
+
+### **[👉 Live Demo: https://todo-svelte2026.netlify.app/](https://todo-svelte2026.netlify.app/)**
+
+No installation needed! Just open the link and start organizing your todos. Your data is stored locally in your browser.
+
 ## ✨ Features
 
 ### Core Features
