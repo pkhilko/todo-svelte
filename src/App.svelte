@@ -1,95 +1,345 @@
 <script>
+  import { onMount } from 'svelte';
+  import Auth from './lib/Auth.svelte';
+  import { supabase } from './lib/supabase.js';
+
+  // Auth State
+  let user = null;
+  let loading = true;
+  let errorMsg = '';
+
   // Theme State
   let dark = false;
 
   // Multiple Lists State
-  let lists = [{ id: 1, name: 'My List', todos: [] }];
-  let activeListId = 1;
-  let nextListId = 2;
+  let lists = [];
+  let activeListId = null;
   let newListName = '';
 
   // Todo State
-  let nextId = 1;
   let newText = '';
 
   // Edit state
   let editingId = null;
   let editText = '';
+  let editPriority = 'medium';
+  let editDueDate = '';
 
   // Derived state
   $: activeList = lists.find(l => l.id === activeListId);
-  $: remaining = activeList.todos.filter(t => !t.completed).length;
-  $: total = activeList.todos.length;
+  $: remaining = activeList?.todos?.filter(t => !t.completed).length ?? 0;
+  $: total = activeList?.todos?.length ?? 0;
+
+  // Helper function to parse date string in local timezone
+  function parseLocalDate(dateStr) {
+    const [year, month, day] = dateStr.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  }
+
+  // Helper function to check if todo is overdue
+  function isOverdue(dueDate) {
+    if (!dueDate) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const due = parseLocalDate(dueDate);
+    due.setHours(0, 0, 0, 0);
+    return due < today;
+  }
+
+  // Helper function to format date
+  function formatDate(dateStr) {
+    if (!dateStr) return '';
+    const date = parseLocalDate(dateStr);
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  }
+
+  // Helper function to check if date is today
+  function isToday(dateStr) {
+    if (!dateStr) return false;
+    const today = new Date().toISOString().split('T')[0];
+    return dateStr === today;
+  }
+
+  // Load data from Supabase
+  async function loadFromDB() {
+    try {
+      const [{ data: listsData, error: listsError }, { data: todosData, error: todosError }] = await Promise.all([
+        supabase.from('lists').select('*').order('position'),
+        supabase.from('todos').select('*').order('position')
+      ]);
+
+      if (listsError || todosError) throw new Error('Failed to load data');
+
+      lists = (listsData ?? []).map(l => ({
+        ...l,
+        todos: (todosData ?? [])
+          .filter(t => t.list_id === l.id)
+          .map(t => ({ ...t, dueDate: t.due_date ?? '' }))
+      }));
+
+      if (lists.length > 0) {
+        activeListId = lists[0].id;
+      }
+    } catch (e) {
+      console.error('Failed to load from DB:', e);
+      errorMsg = 'Failed to load data';
+    }
+  }
+
+  // Auth & Initialization
+  onMount(async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      user = session?.user ?? null;
+      if (user) {
+        await loadFromDB();
+      }
+      loading = false;
+
+      supabase.auth.onAuthStateChange(async (_event, session) => {
+        user = session?.user ?? null;
+        if (user) {
+          await loadFromDB();
+        } else {
+          lists = [];
+          activeListId = null;
+        }
+      });
+    } catch (e) {
+      console.error('Auth error:', e);
+      loading = false;
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  });
 
   // CRUD Operations for Todos
 
-  function addTodo() {
+  async function addTodo() {
     const trimmed = newText.trim();
     if (!trimmed) return;
-    activeList.todos = [...activeList.todos, {
-      id: nextId++,
+
+    const tempId = crypto.randomUUID();
+    const position = activeList.todos.length;
+    const newTodo = {
+      id: tempId,
       text: trimmed,
       completed: false,
       priority: newPriority,
       dueDate: newDueDate
-    }];
+    };
+
+    // Optimistic update
+    activeList.todos = [...activeList.todos, newTodo];
     lists = [...lists];
     newText = '';
     newPriority = 'medium';
     newDueDate = '';
-    if (initialized) saveToStorage();
+
+    // DB write
+    try {
+      const { data, error } = await supabase
+        .from('todos')
+        .insert({
+          list_id: activeListId,
+          user_id: user.id,
+          text: newTodo.text,
+          completed: false,
+          priority: newTodo.priority,
+          due_date: newTodo.dueDate || null,
+          position
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Replace temp ID with real UUID
+      activeList.todos = activeList.todos.map(t =>
+        t.id === tempId ? { ...data, dueDate: data.due_date ?? '' } : t
+      );
+      lists = [...lists];
+    } catch (e) {
+      // Revert
+      activeList.todos = activeList.todos.filter(t => t.id !== tempId);
+      lists = [...lists];
+      errorMsg = 'Failed to save todo';
+    }
   }
 
-  function toggleTodo(id) {
-    activeList.todos = activeList.todos.map(t => t.id === id ? { ...t, completed: !t.completed } : t);
+  async function toggleTodo(id) {
+    const todo = activeList.todos.find(t => t.id === id);
+    if (!todo) return;
+
+    const oldCompleted = todo.completed;
+
+    // Optimistic update
+    activeList.todos = activeList.todos.map(t =>
+      t.id === id ? { ...t, completed: !t.completed } : t
+    );
     lists = [...lists];
-    if (initialized) saveToStorage();
+
+    // DB write
+    try {
+      const { error } = await supabase
+        .from('todos')
+        .update({ completed: !oldCompleted })
+        .eq('id', id);
+
+      if (error) throw error;
+    } catch (e) {
+      // Revert
+      activeList.todos = activeList.todos.map(t =>
+        t.id === id ? { ...t, completed: oldCompleted } : t
+      );
+      lists = [...lists];
+      errorMsg = 'Failed to update todo';
+    }
   }
 
-  function deleteTodo(id) {
+  async function deleteTodo(id) {
+    const todoIndex = activeList.todos.findIndex(t => t.id === id);
+    if (todoIndex === -1) return;
+
+    const deleted = activeList.todos[todoIndex];
+
+    // Optimistic update
     activeList.todos = activeList.todos.filter(t => t.id !== id);
     lists = [...lists];
     if (editingId === id) cancelEdit();
-    if (initialized) saveToStorage();
+
+    // DB write
+    try {
+      const { error } = await supabase.from('todos').delete().eq('id', id);
+
+      if (error) throw error;
+    } catch (e) {
+      // Revert
+      activeList.todos.splice(todoIndex, 0, deleted);
+      activeList.todos = [...activeList.todos];
+      lists = [...lists];
+      errorMsg = 'Failed to delete todo';
+    }
   }
 
   function startEdit(todo) {
     editingId = todo.id;
     editText = todo.text;
+    editPriority = todo.priority;
+    editDueDate = todo.dueDate;
   }
 
-  function saveEdit(id) {
+  async function saveEdit(id) {
     const trimmed = editText.trim();
     if (!trimmed) return;
-    activeList.todos = activeList.todos.map(t => t.id === id ? { ...t, text: trimmed } : t);
+
+    const todo = activeList.todos.find(t => t.id === id);
+    if (!todo) return;
+
+    const oldText = todo.text;
+    const oldPriority = todo.priority;
+    const oldDueDate = todo.dueDate;
+
+    // Optimistic update
+    activeList.todos = activeList.todos.map(t =>
+      t.id === id ? { ...t, text: trimmed, priority: editPriority, dueDate: editDueDate } : t
+    );
     lists = [...lists];
     cancelEdit();
-    if (initialized) saveToStorage();
+
+    // DB write
+    try {
+      const { error } = await supabase
+        .from('todos')
+        .update({
+          text: trimmed,
+          priority: editPriority,
+          due_date: editDueDate || null
+        })
+        .eq('id', id);
+
+      if (error) throw error;
+    } catch (e) {
+      // Revert
+      activeList.todos = activeList.todos.map(t =>
+        t.id === id ? { ...t, text: oldText, priority: oldPriority, dueDate: oldDueDate } : t
+      );
+      lists = [...lists];
+      errorMsg = 'Failed to save todo';
+    }
   }
 
   function cancelEdit() {
     editingId = null;
     editText = '';
+    editPriority = 'medium';
+    editDueDate = '';
   }
 
   // Multiple Lists Operations
 
-  function addList() {
+  async function addList() {
     const trimmed = newListName.trim();
     if (!trimmed) return;
-    lists = [...lists, { id: nextListId++, name: trimmed, todos: [] }];
-    activeListId = lists[lists.length - 1].id;
+
+    const tempId = crypto.randomUUID();
+    const position = lists.length;
+
+    // Optimistic update
+    const newList = { id: tempId, name: trimmed, todos: [] };
+    lists = [...lists, newList];
+    activeListId = tempId;
     newListName = '';
-    if (initialized) saveToStorage();
+
+    // DB write
+    try {
+      const { data, error } = await supabase
+        .from('lists')
+        .insert({
+          user_id: user.id,
+          name: trimmed,
+          position
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Replace temp ID with real UUID
+      lists = lists.map(l => (l.id === tempId ? { ...data, todos: [] } : l));
+      activeListId = data.id;
+    } catch (e) {
+      // Revert
+      lists = lists.filter(l => l.id !== tempId);
+      if (lists.length > 0) {
+        activeListId = lists[0].id;
+      }
+      errorMsg = 'Failed to create list';
+    }
   }
 
-  function deleteList(id) {
-    if (lists.length === 1) return; // Always keep at least 1 list
+  async function deleteList(id) {
+    if (lists.length === 1) return;
+
+    const deletedList = lists.find(l => l.id === id);
+    const newActiveId = activeListId === id ? lists.find(l => l.id !== id)?.id : activeListId;
+
+    // Optimistic update
     lists = lists.filter(l => l.id !== id);
-    if (activeListId === id) {
-      activeListId = lists[0].id;
+    activeListId = newActiveId ?? null;
+
+    // DB write
+    try {
+      const { error } = await supabase.from('lists').delete().eq('id', id);
+
+      if (error) throw error;
+    } catch (e) {
+      // Revert
+      lists = [...lists, deletedList];
+      activeListId = id;
+      errorMsg = 'Failed to delete list';
     }
-    if (initialized) saveToStorage();
   }
 
   // Key Handlers
@@ -132,82 +382,16 @@
 
   // Derived state for filtering
   $: filteredByStatus = filter === 'all'
-    ? activeList.todos
+    ? activeList?.todos ?? []
     : filter === 'active'
-    ? activeList.todos.filter(t => !t.completed)
-    : activeList.todos.filter(t => t.completed);
+    ? (activeList?.todos ?? []).filter(t => !t.completed)
+    : (activeList?.todos ?? []).filter(t => t.completed);
 
   $: visibleTodos = searchText.trim()
     ? filteredByStatus.filter(t => t.text.toLowerCase().includes(searchText.toLowerCase()))
     : filteredByStatus;
 
-  $: completedCount = activeList.todos.filter(t => t.completed).length;
-
-  // Helper function to check if todo is overdue
-  function isOverdue(dueDate) {
-    if (!dueDate) return false;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const due = new Date(dueDate);
-    due.setHours(0, 0, 0, 0);
-    return due < today;
-  }
-
-  // Helper function to format date
-  function formatDate(dateStr) {
-    if (!dateStr) return '';
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  }
-
-  // Helper function to check if date is today
-  function isToday(dateStr) {
-    if (!dateStr) return false;
-    const today = new Date().toISOString().split('T')[0];
-    return dateStr === today;
-  }
-
-  // LocalStorage Persistence
-  import { onMount } from 'svelte';
-  let initialized = false;
-
-  function loadFromStorage() {
-    try {
-      const saved = localStorage.getItem('todoo-data');
-      if (saved) {
-        const data = JSON.parse(saved);
-        if (data.lists?.length > 0) {
-          lists = data.lists;
-          nextListId = data.nextListId || 2;
-          nextId = data.nextId || 1;
-          activeListId = data.activeListId || 1;
-          dark = data.dark ?? false;
-        }
-      }
-    } catch (e) {
-      console.error('Failed to load from localStorage:', e);
-    }
-    initialized = true;
-  }
-
-  function saveToStorage() {
-    if (!initialized) return; // Don't save until after load
-    try {
-      localStorage.setItem('todoo-data', JSON.stringify({
-        lists,
-        activeListId,
-        nextListId,
-        nextId,
-        dark
-      }));
-    } catch (e) {
-      console.error('Failed to save to localStorage:', e);
-    }
-  }
-
-  onMount(() => {
-    loadFromStorage();
-  });
+  $: completedCount = (activeList?.todos ?? []).filter(t => t.completed).length;
 
   // List Rename Functions
   function startEditList(id, name) {
@@ -215,15 +399,32 @@
     editListName = name;
   }
 
-  function saveListName(id) {
+  async function saveListName(id) {
     const trimmed = editListName.trim();
     if (!trimmed) {
       cancelEditList();
       return;
     }
-    lists = lists.map(l => l.id === id ? { ...l, name: trimmed } : l);
+
+    const list = lists.find(l => l.id === id);
+    if (!list) return;
+
+    const oldName = list.name;
+
+    // Optimistic update
+    lists = lists.map(l => (l.id === id ? { ...l, name: trimmed } : l));
     cancelEditList();
-    if (initialized) saveToStorage();
+
+    // DB write
+    try {
+      const { error } = await supabase.from('lists').update({ name: trimmed }).eq('id', id);
+
+      if (error) throw error;
+    } catch (e) {
+      // Revert
+      lists = lists.map(l => (l.id === id ? { ...l, name: oldName } : l));
+      errorMsg = 'Failed to rename list';
+    }
   }
 
   function cancelEditList() {
@@ -237,20 +438,46 @@
   }
 
   // Clear Completed Todos
-  function clearCompleted() {
+  async function clearCompleted() {
+    const completedIds = activeList.todos.filter(t => t.completed).map(t => t.id);
+    if (completedIds.length === 0) return;
+
+    const cleared = activeList.todos.filter(t => t.completed);
+
+    // Optimistic update
     activeList.todos = activeList.todos.filter(t => !t.completed);
     lists = [...lists];
-    if (initialized) saveToStorage();
+
+    // DB write
+    try {
+      const { error } = await supabase
+        .from('todos')
+        .delete()
+        .in('id', completedIds);
+
+      if (error) throw error;
+    } catch (e) {
+      // Revert
+      activeList.todos = [...activeList.todos, ...cleared];
+      lists = [...lists];
+      errorMsg = 'Failed to clear completed todos';
+    }
   }
 
-  // Reset filter when switching lists
-  $: activeListId, filter = 'all';
+  // Reset filter and search when switching lists
+  $: activeListId, (filter = 'all'), (searchText = '');
 
   // Save dark mode changes
   function toggleDarkMode() {
     dark = !dark;
-    if (initialized) saveToStorage();
+    localStorage.setItem('todoo-theme', JSON.stringify(dark));
   }
+
+  // Load theme on mount
+  onMount(() => {
+    const saved = localStorage.getItem('todoo-theme');
+    if (saved) dark = JSON.parse(saved);
+  });
 
   // Tier 3: Drag & Drop, Keyboard Shortcuts, Delete Confirmation
   let draggedTodoId = null;
@@ -269,7 +496,7 @@
     e.dataTransfer.dropEffect = 'move';
   }
 
-  function handleTodoDrop(e, targetTodoId) {
+  async function handleTodoDrop(e, targetTodoId) {
     e.preventDefault();
     if (!draggedTodoId || draggedTodoId === targetTodoId) {
       draggedTodoId = null;
@@ -286,10 +513,24 @@
     const [dragged] = reordered.splice(draggedIndex, 1);
     reordered.splice(targetIndex, 0, dragged);
 
+    // Optimistic update
     activeList.todos = reordered;
     lists = [...lists];
     draggedTodoId = null;
-    if (initialized) saveToStorage();
+
+    // DB write - update positions
+    try {
+      const updates = reordered.map((t, idx) => ({ id: t.id, position: idx }));
+      for (const update of updates) {
+        const { error } = await supabase.from('todos').update({ position: update.position }).eq('id', update.id);
+        if (error) throw error;
+      }
+    } catch (e) {
+      // Revert
+      activeList.todos = todos;
+      lists = [...lists];
+      errorMsg = 'Failed to reorder todos';
+    }
   }
 
   function handleTodoDragEnd() {
@@ -307,7 +548,7 @@
     e.dataTransfer.dropEffect = 'move';
   }
 
-  function handleListDrop(e, targetListId) {
+  async function handleListDrop(e, targetListId) {
     e.preventDefault();
     if (!draggedListId || draggedListId === targetListId) {
       draggedListId = null;
@@ -323,9 +564,22 @@
     const [dragged] = reordered.splice(draggedIndex, 1);
     reordered.splice(targetIndex, 0, dragged);
 
+    // Optimistic update
     lists = reordered;
     draggedListId = null;
-    if (initialized) saveToStorage();
+
+    // DB write - update positions
+    try {
+      const updates = reordered.map((l, idx) => ({ id: l.id, position: idx }));
+      for (const update of updates) {
+        const { error } = await supabase.from('lists').update({ position: update.position }).eq('id', update.id);
+        if (error) throw error;
+      }
+    } catch (e) {
+      // Revert
+      lists = [...lists].reverse();
+      errorMsg = 'Failed to reorder lists';
+    }
   }
 
   function handleListDragEnd() {
@@ -357,236 +611,270 @@
     }
   }
 
-  // Set up keyboard listener on mount
-  onMount(() => {
-    loadFromStorage();
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  });
+  // Clear error message after 3 seconds
+  $: if (errorMsg) {
+    setTimeout(() => {
+      errorMsg = '';
+    }, 3000);
+  }
 </script>
 
 <main class:dark>
-  <div class="layout">
-    <!-- Mobile Overlay -->
-    {#if sidebarOpen}
-      <button
-        class="mobile-overlay"
-        on:click={closeSidebar}
-        type="button"
-        aria-label="Close menu"
-      ></button>
-    {/if}
+  {#if loading}
+    <div class="loading-screen">Loading…</div>
+  {:else if !user}
+    <Auth />
+  {:else}
+    <div class="layout">
+      <!-- Mobile Overlay -->
+      {#if sidebarOpen}
+        <button
+          class="mobile-overlay"
+          on:click={closeSidebar}
+          type="button"
+          aria-label="Close menu"
+        ></button>
+      {/if}
 
-    <!-- Sidebar -->
-    <aside class="sidebar" class:open={sidebarOpen}>
-      <div class="lists-header">
-        <h2>Lists</h2>
-        <div class="header-actions">
-          <button class="btn-theme" on:click={toggleDarkMode}>
-            {dark ? '☀' : '☾'}
-          </button>
-          <button class="btn-close-sidebar" on:click={closeSidebar} title="Close">
-            ✕
-          </button>
+      <!-- Sidebar -->
+      <aside class="sidebar" class:open={sidebarOpen}>
+        <div class="logo-header">
+          <img src="/logo.png" alt="TaskPulse Poppins" class="logo" />
         </div>
-      </div>
+        <div class="lists-header">
+          <h2>Lists</h2>
+          <div class="header-actions">
+            <button class="btn-theme" on:click={toggleDarkMode}>
+              {dark ? '☀' : '☾'}
+            </button>
+            <button class="btn-logout" on:click={() => supabase.auth.signOut()} title="Sign out">
+              ⎋
+            </button>
+            <button class="btn-close-sidebar" on:click={closeSidebar} title="Close">
+              ✕
+            </button>
+          </div>
+        </div>
 
-      <ul class="lists">
-        {#each lists as list (list.id)}
-          <li
-            class:active={activeListId === list.id}
-            class:dragging={draggedListId === list.id}
-            draggable={lists.length > 1}
-            on:dragstart={(e) => handleListDragStart(e, list.id)}
-            on:dragover={handleListDragOver}
-            on:drop={(e) => handleListDrop(e, list.id)}
-            on:dragend={handleListDragEnd}
-          >
-            {#if editingListId === list.id}
-              <input
-                class="edit-list-name"
-                type="text"
-                bind:value={editListName}
-                on:keydown={(e) => handleListNameKey(e, list.id)}
-                on:blur={() => saveListName(list.id)}
-                autofocus
-              />
-            {:else}
-              <button
-                class="list-item"
-                on:click={() => (activeListId = list.id)}
-                on:dblclick={() => startEditList(list.id, list.name)}
-              >
-                {list.name}
-              </button>
-            {/if}
-            {#if lists.length > 1}
-              {#if deletingListId === list.id}
-                <div class="delete-confirm">
-                  <span class="confirm-text">{list.todos.length} todo{list.todos.length !== 1 ? 's' : ''}?</span>
-                  <button class="btn-confirm-yes" on:click={confirmDeleteList}>Yes</button>
-                  <button class="btn-confirm-no" on:click={cancelDeleteList}>No</button>
-                </div>
+        <ul class="lists">
+          {#each lists as list (list.id)}
+            <li
+              class:active={activeListId === list.id}
+              class:dragging={draggedListId === list.id}
+              draggable={lists.length > 1}
+              on:dragstart={(e) => handleListDragStart(e, list.id)}
+              on:dragover={handleListDragOver}
+              on:drop={(e) => handleListDrop(e, list.id)}
+              on:dragend={handleListDragEnd}
+            >
+              {#if editingListId === list.id}
+                <input
+                  class="edit-list-name"
+                  type="text"
+                  bind:value={editListName}
+                  on:keydown={(e) => handleListNameKey(e, list.id)}
+                  on:blur={() => saveListName(list.id)}
+                  autofocus
+                />
               {:else}
                 <button
-                  class="btn-delete-list"
-                  on:click={() => startDeleteList(list.id)}
-                  title="Delete list"
+                  class="list-item"
+                  on:click={() => (activeListId = list.id)}
+                  on:dblclick={() => startEditList(list.id, list.name)}
                 >
-                  ×
+                  <span>{list.name}</span>
+                  <span class="list-count">{list.todos.filter(t => !t.completed).length}</span>
                 </button>
               {/if}
-            {/if}
-          </li>
-        {/each}
-      </ul>
+              {#if lists.length > 1}
+                {#if deletingListId === list.id}
+                  <div class="delete-confirm">
+                    <span class="confirm-text">{list.todos.length} todo{list.todos.length !== 1 ? 's' : ''}?</span>
+                    <button class="btn-confirm-yes" on:click={confirmDeleteList}>Yes</button>
+                    <button class="btn-confirm-no" on:click={cancelDeleteList}>No</button>
+                  </div>
+                {:else}
+                  <button
+                    class="btn-delete-list"
+                    on:click={() => startDeleteList(list.id)}
+                    title="Delete list"
+                  >
+                    ×
+                  </button>
+                {/if}
+              {/if}
+            </li>
+          {/each}
+        </ul>
 
-      <div class="new-list-row">
-        <input
-          type="text"
-          placeholder="New list..."
-          bind:value={newListName}
-          on:keydown={handleAddListKey}
-        />
-        <button class="btn-add-list" on:click={addList}>+</button>
-      </div>
-    </aside>
-
-    <!-- Main Content -->
-    <div class="content">
-      <div class="mobile-header">
-        <button class="btn-menu" on:click={toggleSidebar} title="Menu">
-          ☰
-        </button>
-        <h1>{activeList.name}</h1>
-      </div>
-
-      <div class="input-row">
-        <input
-          type="text"
-          placeholder="What needs to be done? (Press / to focus)"
-          bind:value={newText}
-          bind:this={todoInputRef}
-          on:keydown={handleAddKey}
-        />
-        <select class="priority-select" bind:value={newPriority}>
-          <option value="low">Low</option>
-          <option value="medium">Med</option>
-          <option value="high">High</option>
-        </select>
-        <input type="date" class="date-input" bind:value={newDueDate} />
-        <button class="btn-add" on:click={addTodo}>Add</button>
-      </div>
-
-      {#if total > 0 || visibleTodos.length > 0}
-        <div class="search-row">
+        <div class="new-list-row">
           <input
             type="text"
-            placeholder="Search todos..."
-            bind:value={searchText}
-            class="search-input"
+            placeholder="New list..."
+            bind:value={newListName}
+            on:keydown={handleAddListKey}
           />
+          <button class="btn-add-list" on:click={addList}>+</button>
         </div>
-      {/if}
+      </aside>
 
-      {#if total > 0}
-        <div class="stats-row">
-          <p class="stats">{remaining} of {total} remaining</p>
-          {#if completedCount > 0}
-            <button class="btn-clear-completed" on:click={clearCompleted}>
-              Clear completed
-            </button>
-          {/if}
+      <!-- Main Content -->
+      <div class="content">
+        <div class="mobile-header">
+          <button class="btn-menu" on:click={toggleSidebar} title="Menu">
+            ☰
+          </button>
+          <h1>{activeList?.name ?? 'Select a list'}</h1>
         </div>
 
-        <div class="filter-tabs">
-          <button
-            class="filter-tab"
-            class:active={filter === 'all'}
-            on:click={() => (filter = 'all')}
-          >
-            All
-          </button>
-          <button
-            class="filter-tab"
-            class:active={filter === 'active'}
-            on:click={() => (filter = 'active')}
-          >
-            Active
-          </button>
-          <button
-            class="filter-tab"
-            class:active={filter === 'completed'}
-            on:click={() => (filter = 'completed')}
-          >
-            Completed
-          </button>
-        </div>
-      {/if}
+        <h1 class="desktop-title">{activeList?.name ?? 'Select a list'}</h1>
 
-      <ul class="todos">
-        {#each visibleTodos as todo (todo.id)}
-          <li
-            class:completed={todo.completed}
-            class:overdue={!todo.completed && isOverdue(todo.dueDate)}
-            class:priority-high={todo.priority === 'high'}
-            class:priority-medium={todo.priority === 'medium'}
-            class:priority-low={todo.priority === 'low'}
-            class:dragging={draggedTodoId === todo.id}
-            draggable={!editingId}
-            on:dragstart={(e) => handleTodoDragStart(e, todo.id)}
-            on:dragover={handleTodoDragOver}
-            on:drop={(e) => handleTodoDrop(e, todo.id)}
-            on:dragend={handleTodoDragEnd}
-          >
-            {#if editingId === todo.id}
+        {#if activeList}
+          <div class="input-row">
+            <input
+              type="text"
+              placeholder="What needs to be done? (Press / to focus)"
+              bind:value={newText}
+              bind:this={todoInputRef}
+              on:keydown={handleAddKey}
+            />
+            <select class="priority-select" bind:value={newPriority}>
+              <option value="low">Low</option>
+              <option value="medium">Med</option>
+              <option value="high">High</option>
+            </select>
+            <input type="date" class="date-input" bind:value={newDueDate} />
+            <button class="btn-add" on:click={addTodo}>Add</button>
+          </div>
+
+          {#if total > 0 || visibleTodos.length > 0}
+            <div class="search-row">
               <input
-                class="edit-input"
                 type="text"
-                bind:value={editText}
-                on:keydown={(e) => handleEditKey(e, todo.id)}
-                autofocus
+                placeholder="Search todos..."
+                bind:value={searchText}
+                class="search-input"
               />
-              <div class="actions">
-                <button class="btn-save" on:click={() => saveEdit(todo.id)}>Save</button>
-                <button class="btn-cancel" on:click={cancelEdit}>Cancel</button>
-              </div>
-            {:else}
-              <input
-                type="checkbox"
-                checked={todo.completed}
-                on:change={() => toggleTodo(todo.id)}
-              />
-              <div class="todo-content">
-                <span class="todo-text">{todo.text}</span>
-                {#if todo.dueDate || todo.priority !== 'medium'}
-                  <div class="todo-meta">
-                    {#if todo.dueDate}
-                      <span class="due-date" class:today={isToday(todo.dueDate)} class:overdue={!todo.completed && isOverdue(todo.dueDate)}>
-                        {formatDate(todo.dueDate)}
-                      </span>
+            </div>
+          {/if}
+
+          {#if total > 0}
+            <div class="stats-row">
+              <p class="stats">{remaining} of {total} remaining</p>
+              {#if completedCount > 0}
+                <button class="btn-clear-completed" on:click={clearCompleted}>
+                  Clear completed
+                </button>
+              {/if}
+            </div>
+
+            <div class="filter-tabs">
+              <button
+                class="filter-tab"
+                class:active={filter === 'all'}
+                on:click={() => (filter = 'all')}
+              >
+                All
+              </button>
+              <button
+                class="filter-tab"
+                class:active={filter === 'active'}
+                on:click={() => (filter = 'active')}
+              >
+                Active
+              </button>
+              <button
+                class="filter-tab"
+                class:active={filter === 'completed'}
+                on:click={() => (filter = 'completed')}
+              >
+                Completed
+              </button>
+            </div>
+          {/if}
+
+          <ul class="todos">
+            {#each visibleTodos as todo (todo.id)}
+              <li
+                class:completed={todo.completed}
+                class:overdue={!todo.completed && isOverdue(todo.dueDate)}
+                class:priority-high={todo.priority === 'high'}
+                class:priority-medium={todo.priority === 'medium'}
+                class:priority-low={todo.priority === 'low'}
+                class:dragging={draggedTodoId === todo.id}
+                draggable={!editingId}
+                on:dragstart={(e) => handleTodoDragStart(e, todo.id)}
+                on:dragover={handleTodoDragOver}
+                on:drop={(e) => handleTodoDrop(e, todo.id)}
+                on:dragend={handleTodoDragEnd}
+              >
+                {#if editingId === todo.id}
+                  <div class="edit-row">
+                    <input
+                      class="edit-input"
+                      type="text"
+                      bind:value={editText}
+                      on:keydown={(e) => handleEditKey(e, todo.id)}
+                      autofocus
+                    />
+                    <select class="priority-select" bind:value={editPriority}>
+                      <option value="low">Low</option>
+                      <option value="medium">Med</option>
+                      <option value="high">High</option>
+                    </select>
+                    <input type="date" class="date-input" bind:value={editDueDate} />
+                  </div>
+                  <div class="actions">
+                    <button class="btn-save" on:click={() => saveEdit(todo.id)}>Save</button>
+                    <button class="btn-cancel" on:click={cancelEdit}>Cancel</button>
+                  </div>
+                {:else}
+                  <input
+                    type="checkbox"
+                    checked={todo.completed}
+                    on:change={() => toggleTodo(todo.id)}
+                    aria-label="Mark '{todo.text}' as {todo.completed ? 'incomplete' : 'complete'}"
+                  />
+                  <div class="todo-content">
+                    <span class="todo-text">{todo.text}</span>
+                    {#if todo.dueDate || todo.priority !== 'medium'}
+                      <div class="todo-meta">
+                        {#if todo.priority !== 'medium'}
+                          <span class="priority-badge" class:priority-high={todo.priority === 'high'} class:priority-low={todo.priority === 'low'}>
+                            {todo.priority === 'high' ? 'High' : todo.priority === 'low' ? 'Low' : 'Med'}
+                          </span>
+                        {/if}
+                        {#if todo.dueDate}
+                          <span class="due-date" class:today={isToday(todo.dueDate)} class:overdue={!todo.completed && isOverdue(todo.dueDate)}>
+                            {formatDate(todo.dueDate)}
+                          </span>
+                        {/if}
+                      </div>
                     {/if}
                   </div>
+                  <div class="actions">
+                    <button class="btn-edit" on:click={() => startEdit(todo)}>Edit</button>
+                    <button class="btn-delete" on:click={() => deleteTodo(todo.id)}>Delete</button>
+                  </div>
                 {/if}
-              </div>
-              <div class="actions">
-                <button class="btn-edit" on:click={() => startEdit(todo)}>Edit</button>
-                <button class="btn-delete" on:click={() => deleteTodo(todo.id)}>Delete</button>
-              </div>
-            {/if}
-          </li>
-        {:else}
-          {#if searchText.trim()}
-            <p class="empty">No todos found for "{searchText}"</p>
-          {:else}
-            <p class="empty">No todos yet. Add one above!</p>
-          {/if}
-        {/each}
-      </ul>
+              </li>
+            {:else}
+              {#if searchText.trim()}
+                <p class="empty">No todos found for "{searchText}"</p>
+              {:else}
+                <p class="empty">No todos yet. Add one above!</p>
+              {/if}
+            {/each}
+          </ul>
+        {/if}
+      </div>
     </div>
-  </div>
+
+    <!-- Error Toast -->
+    {#if errorMsg}
+      <div class="error-toast">{errorMsg}</div>
+    {/if}
+  {/if}
 </main>
 
 <style>
@@ -609,7 +897,11 @@
     margin: 0;
     padding: 0;
     border: none;
-    outline: none;
+  }
+
+  *:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   :global(html),
@@ -642,6 +934,16 @@
     --sidebar-active: #2d2b55;
     --sidebar-active-text: #a5b4fc;
     background: #1a1a2e;
+  }
+
+  .loading-screen {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100vh;
+    font-size: 1.2rem;
+    color: var(--text-muted);
   }
 
   .layout {
@@ -699,6 +1001,20 @@
     background: var(--border);
   }
 
+  .logo-header {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 12px 0 8px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  .logo {
+    height: 48px;
+    object-fit: contain;
+  }
+
   .lists-header {
     display: flex;
     justify-content: space-between;
@@ -716,7 +1032,8 @@
     align-items: center;
   }
 
-  .btn-theme {
+  .btn-theme,
+  .btn-logout {
     width: 36px;
     height: 36px;
     border: none;
@@ -731,7 +1048,8 @@
     transition: background 0.2s;
   }
 
-  .btn-theme:hover {
+  .btn-theme:hover,
+  .btn-logout:hover {
     background: var(--border);
   }
 
@@ -760,6 +1078,10 @@
     cursor: pointer;
     text-align: left;
     transition: background 0.2s;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
   }
 
   .list-item:hover {
@@ -770,6 +1092,21 @@
     background: var(--sidebar-active);
     color: var(--sidebar-active-text);
     font-weight: 600;
+  }
+
+  .list-count {
+    background: var(--border);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .lists li.active .list-count {
+    background: rgba(255, 255, 255, 0.2);
+    color: inherit;
   }
 
   .edit-list-name {
@@ -890,6 +1227,16 @@
     font-weight: 700;
     margin-bottom: 24px;
     text-align: center;
+  }
+
+  .desktop-title {
+    display: block;
+  }
+
+  @media (max-width: 768px) {
+    .desktop-title {
+      display: none;
+    }
   }
 
   .input-row {
@@ -1084,6 +1431,25 @@
     flex-wrap: wrap;
   }
 
+  .priority-badge {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    background: var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .priority-badge.priority-high {
+    background: #dc2626;
+    color: white;
+  }
+
+  .priority-badge.priority-low {
+    background: #10b981;
+    color: white;
+  }
+
   .due-date {
     font-size: 0.8rem;
     padding: 2px 6px;
@@ -1118,8 +1484,12 @@
     background: var(--border);
   }
 
-  .lists li {
+  .lists li[draggable='true'] {
     cursor: grab;
+  }
+
+  .lists li[draggable='true']:active {
+    cursor: grabbing;
   }
 
   .lists li.dragging {
@@ -1171,7 +1541,7 @@
     color: var(--sidebar-active-text);
   }
 
-  .todos li input[type="checkbox"] {
+  .todos li input[type='checkbox'] {
     width: 18px;
     height: 18px;
     cursor: pointer;
@@ -1185,6 +1555,12 @@
     word-break: break-word;
   }
 
+  .edit-row {
+    display: flex;
+    gap: 8px;
+    flex: 1;
+  }
+
   .edit-input {
     flex: 1;
     padding: 6px 10px;
@@ -1194,6 +1570,16 @@
     border-radius: 6px;
     font-size: 1rem;
     outline: none;
+  }
+
+  .edit-row .priority-select,
+  .edit-row .date-input {
+    padding: 6px 8px;
+    background: var(--surface);
+    color: var(--text);
+    border: 2px solid var(--accent);
+    border-radius: 6px;
+    font-size: 0.9rem;
   }
 
   .actions {
@@ -1253,6 +1639,33 @@
     padding: 24px 0;
   }
 
+  /* Error toast */
+  .error-toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #dc2626;
+    color: white;
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 1000;
+    animation: slideUp 0.3s ease;
+  }
+
+  @keyframes slideUp {
+    from {
+      transform: translateX(-50%) translateY(20px);
+      opacity: 0;
+    }
+    to {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+  }
+
   /* Responsive Design */
   @media (max-width: 768px) {
     .layout {
@@ -1287,6 +1700,10 @@
 
     .sidebar.open {
       transform: translateX(0);
+    }
+
+    .logo {
+      height: 40px;
     }
 
     .btn-close-sidebar {
@@ -1453,7 +1870,7 @@
       border-radius: 8px;
     }
 
-    .todos li input[type="checkbox"] {
+    .todos li input[type='checkbox'] {
       width: 16px;
       height: 16px;
     }
@@ -1498,6 +1915,10 @@
     .btn-confirm-no {
       padding: 2px 5px;
       font-size: 0.65rem;
+    }
+
+    .logo {
+      height: 36px;
     }
   }
 </style>
